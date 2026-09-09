@@ -3,28 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Eyeline capture probe</title>
+<title>Capture probe</title>
 <!--
-  EYELINE CAPTURE PROBE — diagnostic harness, not the product.
+  CAPTURE PROBE — diagnostic harness, not the product. Published under a working title;
+  the project name is withheld pending clearance.
   Settles: D1/D2 (camera inside an installed home-screen web app, iOS and Android),
            D7 (occluded window capture on macOS and Windows).
   Version and self-hash are printed in the report so "which version did I run?"
-  has a checkable answer against the delivery ledger (EYELINE-06).
+  has a checkable answer against the project's delivery ledger.
   v2.0.0 — added web app manifest (without one, add-to-home-screen opens in the
   browser, so v1 could not reach its subject), display-mode and permission
   readouts, launch memory for the iOS re-prompt question, live camera preview,
   mobile-visible results, share/show report. No service worker, deliberately:
   Chrome has not required one since 108 and a caching worker could serve a stale
   probe under a new version's name.
+  v2.0.1 — files and strings renamed to the working title. No functional change.
 -->
-<link rel="manifest" href="EYELINE-capture-probe.webmanifest">
+<link rel="manifest" href="capture-probe.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Eyeline probe">
+<meta name="apple-mobile-web-app-title" content="Capture probe">
 <meta name="theme-color" content="#1B2126">
-<link rel="apple-touch-icon" href="EYELINE-capture-probe-icon-192.png">
-<link rel="icon" href="EYELINE-capture-probe-icon-192.png">
+<link rel="apple-touch-icon" href="capture-probe-icon-192.png">
+<link rel="icon" href="capture-probe-icon-192.png">
 <style>
   :root{
     --base:#1B2126;
@@ -215,7 +217,7 @@
   <video id="feed" autoplay muted playsinline></video>
   <video id="camfeed" autoplay muted playsinline></video>
   <div id="idle">
-    <p><strong>Eyeline capture probe</strong>
+    <p><strong>Capture probe</strong>
     On a phone: open this from the home-screen icon and press <em>Test camera</em>. On a desktop: start your Zoom or Meet call, press <em>Capture window</em> and pick that window; if the frame counter keeps climbing while this page covers it, occluded capture works here. Then <em>Copy</em> or <em>Share</em> the report.</p>
   </div>
 </div>
@@ -272,7 +274,7 @@
 (function(){
   "use strict";
 
-  var PROBE_VERSION = "2.0.0";
+  var PROBE_VERSION = "2.0.1";
   var $ = function(id){ return document.getElementById(id); };
   var report = { probeVersion: PROBE_VERSION };
 
@@ -304,8 +306,8 @@
     return '<div class="row"><span class="k">'+k+'</span><span class="v '+(cls||"")+'">'+v+'</span></div>';
   }
   function yn(ok){ return ok ? ["yes","pass"] : ["NO","fail"]; }
-  function store(k,v){ try{ localStorage.setItem("eyeline-probe:"+k, JSON.stringify(v)); }catch(e){} }
-  function load(k){ try{ var s = localStorage.getItem("eyeline-probe:"+k); return s===null ? null : JSON.parse(s); }catch(e){ return null; } }
+  function store(k,v){ try{ localStorage.setItem("probe:"+k, JSON.stringify(v)); }catch(e){} }
+  function load(k){ try{ var s = localStorage.getItem("probe:"+k); return s===null ? null : JSON.parse(s); }catch(e){ return null; } }
 
   /* ---------------- environment audit ---------------- */
   var env = {};
@@ -745,7 +747,7 @@
   function reportText(){
     if (track) finishReport();
     report.generated = new Date().toISOString();
-    return "EYELINE CAPTURE PROBE v" + PROBE_VERSION + "\n" + JSON.stringify(report, null, 2);
+    return "CAPTURE PROBE v" + PROBE_VERSION + "\n" + JSON.stringify(report, null, 2);
   }
   $("btnCopy").addEventListener("click", function(){
     var txt = reportText(), btn = this;
@@ -763,7 +765,7 @@
   $("btnShare").addEventListener("click", function(){
     var txt = reportText(), btn = this;
     if (!env.share){ btn.textContent = "Share unavailable"; setTimeout(function(){ btn.textContent = "Share report"; }, 2200); return; }
-    navigator.share({ title: "Eyeline probe report", text: txt }).catch(function(){});
+    navigator.share({ title: "Capture probe report", text: txt }).catch(function(){});
   });
   $("btnShow").addEventListener("click", function(){
     var sh = $("sheet"), open = sh.style.display === "block";
