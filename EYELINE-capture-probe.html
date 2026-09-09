@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Eyeline capture probe</title>
+<!--
+  EYELINE CAPTURE PROBE — diagnostic harness, not the product.
+  Settles: D1/D2 (camera inside an installed home-screen web app, iOS and Android),
+           D7 (occluded window capture on macOS and Windows).
+  Version and self-hash are printed in the report so "which version did I run?"
+  has a checkable answer against the delivery ledger (EYELINE-06).
+  v2.0.0 — added web app manifest (without one, add-to-home-screen opens in the
+  browser, so v1 could not reach its subject), display-mode and permission
+  readouts, launch memory for the iOS re-prompt question, live camera preview,
+  mobile-visible results, share/show report. No service worker, deliberately:
+  Chrome has not required one since 108 and a caching worker could serve a stale
+  probe under a new version's name.
+-->
+<link rel="manifest" href="EYELINE-capture-probe.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Eyeline probe">
+<meta name="theme-color" content="#1B2126">
+<link rel="apple-touch-icon" href="EYELINE-capture-probe-icon-192.png">
+<link rel="icon" href="EYELINE-capture-probe-icon-192.png">
+<style>
+  :root{
+    --base:#1B2126;
+    --panel:rgba(10,14,17,.84);
+    --edge:rgba(255,255,255,.14);
+    --ink:#F2EFE6;
+    --muted:#8A99A3;
+    --amber:#E8A33D;
+    --pass:#5FB08C;
+    --fail:#D8564B;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--base);
+    font-family:var(--sans);
+    color:var(--ink);
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* ---- capture / camera layer ---- */
+  #stage{position:fixed;inset:0;overflow:hidden;background:var(--base)}
+  #feed,#camfeed{
+    position:absolute;top:50%;left:50%;
+    min-width:100%;min-height:100%;
+    transform:translate(-50%,-50%);
+    transform-origin:center center;
+    display:none;
+    object-fit:cover;
+  }
+  #idle{
+    position:absolute;inset:0;
+    display:flex;align-items:center;justify-content:center;
+    text-align:center;padding:2rem;
+  }
+  #idle p{color:var(--muted);font-size:.95rem;line-height:1.6;max-width:34ch}
+  #idle strong{color:var(--ink);font-weight:600;display:block;margin-bottom:.6rem;font-size:1.05rem}
+
+  /* ---- prompter text layer ---- */
+  #prompter{
+    position:fixed;inset:0;
+    display:flex;justify-content:center;
+    pointer-events:none;
+    overflow:hidden;
+  }
+  #scroller{
+    width:min(62ch,74vw);
+    padding-top:46vh;
+    will-change:transform;
+  }
+  #script{
+    font-size:44px;
+    line-height:1.42;
+    font-weight:600;
+    letter-spacing:.005em;
+    text-align:center;
+    text-shadow:
+      0 0 2px rgba(0,0,0,.95),
+      0 2px 10px rgba(0,0,0,.9),
+      0 0 30px rgba(0,0,0,.7);
+  }
+  #script p{margin:0 0 1.1em}
+  #script .other{opacity:.42;font-weight:400;font-style:italic}
+
+  #cue{position:fixed;top:46vh;left:0;right:0;pointer-events:none;display:none}
+  #cue span{
+    position:absolute;top:-11px;
+    width:0;height:0;
+    border-top:11px solid transparent;
+    border-bottom:11px solid transparent;
+  }
+  #cue .l{left:14px;border-left:16px solid var(--amber)}
+  #cue .r{right:14px;border-right:16px solid var(--amber)}
+
+  /* ---- readouts ---- */
+  .panel{
+    position:fixed;
+    background:var(--panel);
+    border:1px solid var(--edge);
+    border-radius:4px;
+    backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px);
+  }
+
+  #meter{
+    top:calc(16px + env(safe-area-inset-top));right:16px;
+    padding:14px 18px 12px;
+    min-width:190px;max-width:min(320px,calc(100vw - 32px));
+    text-align:right;
+  }
+  #fps{
+    font-size:52px;line-height:.92;font-weight:700;
+    font-variant-numeric:tabular-nums;
+    letter-spacing:-.02em;
+  }
+  #fps.dead{color:var(--fail)}
+  #fps.weak{color:var(--amber)}
+  #fps.good{color:var(--pass)}
+  #meter .unit{font-size:.72rem;color:var(--muted);margin-top:4px}
+  #verdict{
+    margin-top:10px;padding-top:10px;
+    border-top:1px solid var(--edge);
+    font-size:.78rem;line-height:1.45;color:var(--muted);
+  }
+  #verdict b{display:block;font-size:.85rem;margin-bottom:2px}
+  #verdict.dead b{color:var(--fail)}
+  #verdict.good b{color:var(--pass)}
+  #verdict.weak b{color:var(--amber)}
+  #verdict .ask{margin-top:8px;display:flex;gap:6px;justify-content:flex-end}
+  #verdict .ask button{font-size:.72rem;padding:4px 9px}
+
+  #diag{
+    top:calc(16px + env(safe-area-inset-top));left:16px;
+    padding:12px 14px;
+    width:300px;
+    max-height:calc(100vh - 170px);
+    overflow-y:auto;
+    font-size:.76rem;
+  }
+  #diag h2{
+    font-size:.76rem;font-weight:600;color:var(--muted);
+    margin-bottom:8px;
+  }
+  .row{display:flex;justify-content:space-between;gap:10px;padding:3px 0;line-height:1.4}
+  .row .k{color:var(--muted);flex:0 0 auto}
+  .row .v{text-align:right;font-variant-numeric:tabular-nums;word-break:break-word}
+  .v.pass{color:var(--pass)}
+  .v.fail{color:var(--fail)}
+  .v.warn{color:var(--amber)}
+  .sep{height:1px;background:var(--edge);margin:9px 0}
+  #stamp{font-size:.68rem;color:var(--muted);margin-top:8px;word-break:break-all}
+
+  /* ---- report sheet (for screenshots when copy/share fail) ---- */
+  #sheet{
+    inset:calc(16px + env(safe-area-inset-top)) 16px 90px 16px;
+    display:none;padding:12px;
+  }
+  #sheet textarea{
+    width:100%;height:100%;resize:none;
+    background:transparent;color:var(--ink);border:0;outline:0;
+    font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;
+  }
+
+  /* ---- controls ---- */
+  #bar{
+    bottom:calc(16px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);
+    padding:10px 12px;
+    display:flex;align-items:center;gap:8px;
+    flex-wrap:wrap;justify-content:center;
+    max-width:calc(100vw - 32px);
+  }
+  button{
+    font-family:inherit;font-size:.8rem;font-weight:500;
+    color:var(--ink);
+    background:rgba(255,255,255,.07);
+    border:1px solid var(--edge);
+    border-radius:3px;
+    padding:7px 13px;
+    cursor:pointer;
+  }
+  button:hover{background:rgba(255,255,255,.14)}
+  button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+  button.on{background:var(--amber);border-color:var(--amber);color:#171208}
+  button.key{background:rgba(95,176,140,.22);border-color:rgba(95,176,140,.5)}
+  .slider{display:flex;align-items:center;gap:7px;font-size:.72rem;color:var(--muted)}
+  input[type=range]{width:86px;accent-color:var(--amber)}
+  .div{width:1px;height:22px;background:var(--edge);margin:0 2px}
+  #btnDiag{display:none}
+
+  @media (max-width:900px){
+    #diag{display:none;width:calc(100vw - 32px);max-height:calc(100vh - 180px)}
+    #diag.open{display:block}
+    #btnDiag{display:inline-block}
+    #script{font-size:30px}
+    #meter{padding:10px 12px;min-width:120px}
+    #fps{font-size:34px}
+    .slider{display:none}
+    .div{display:none}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="feed" autoplay muted playsinline></video>
+  <video id="camfeed" autoplay muted playsinline></video>
+  <div id="idle">
+    <p><strong>Eyeline capture probe</strong>
+    On a phone: open this from the home-screen icon and press <em>Test camera</em>. On a desktop: start your Zoom or Meet call, press <em>Capture window</em> and pick that window; if the frame counter keeps climbing while this page covers it, occluded capture works here. Then <em>Copy</em> or <em>Share</em> the report.</p>
+  </div>
+</div>
+
+<div id="prompter"><div id="scroller"><div id="script"></div></div></div>
+
+<div id="cue"><span class="l"></span><span class="r"></span></div>
+
+<div class="panel" id="meter">
+  <div id="fps">—</div>
+  <div class="unit">frames per second</div>
+  <div id="verdict"><b>Idle</b>Nothing running.</div>
+</div>
+
+<div class="panel" id="diag">
+  <h2>Environment</h2>
+  <div id="envRows"></div>
+  <div class="sep"></div>
+  <h2>Installed app &amp; permissions</h2>
+  <div id="pwaRows"></div>
+  <div class="sep"></div>
+  <h2>Capture</h2>
+  <div id="capRows"><div class="row"><span class="k">status</span><span class="v">not started</span></div></div>
+  <div class="sep"></div>
+  <h2>Controls &amp; camera</h2>
+  <div id="ctlRows"></div>
+  <div id="stamp"></div>
+</div>
+
+<div class="panel" id="sheet"><textarea id="sheetText" readonly></textarea></div>
+
+<div class="panel" id="bar">
+  <button id="btnCam" class="key">Test camera</button>
+  <button id="btnCap">Capture window</button>
+  <div class="div"></div>
+  <button id="btnRoll">Start scroll</button>
+  <div class="slider"><label for="spd">speed</label><input id="spd" type="range" min="10" max="200" value="55"></div>
+  <div class="slider"><label for="siz">size</label><input id="siz" type="range" min="20" max="90" value="44"></div>
+  <div class="div"></div>
+  <div class="slider"><label for="zoom">bg zoom</label><input id="zoom" type="range" min="100" max="260" value="100"></div>
+  <div class="slider"><label for="pan">bg pan</label><input id="pan" type="range" min="-40" max="40" value="0"></div>
+  <div class="div"></div>
+  <button id="btnMir">Mirror</button>
+  <button id="btnCue">Cue marks</button>
+  <button id="btnFull">Full screen</button>
+  <div class="div"></div>
+  <button id="btnDiag">Details</button>
+  <button id="btnCopy">Copy report</button>
+  <button id="btnShare">Share report</button>
+  <button id="btnShow">Show report</button>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var PROBE_VERSION = "2.0.0";
+  var $ = function(id){ return document.getElementById(id); };
+  var report = { probeVersion: PROBE_VERSION };
+
+  /* ---------------- sample script ---------------- */
+  var LINES = [
+    ["other","MARTA: You said you'd tell me when it was done."],
+    ["mine","No. I said I'd tell you when it was over. Those aren't the same thing and you know it."],
+    ["other","MARTA: Don't do the lawyer voice with me."],
+    ["mine","It isn't a voice. It's the only way I've got left of saying this so it lands."],
+    ["other","MARTA: Then say it plainly."],
+    ["mine","Plainly. All right. I signed the papers on Tuesday. I sat in that car park for forty minutes afterwards and I could not make myself ring you."],
+    ["other","MARTA: Forty minutes."],
+    ["mine","I counted. That's the sort of thing I do now instead of feeling anything."],
+    ["other","MARTA: And what am I supposed to do with that?"],
+    ["mine","Nothing. You're not supposed to do anything with it. I just didn't want you hearing it from somebody else in a corridor."],
+    ["other","MARTA: You always did think the worst part was the manner of the telling."],
+    ["mine","Because it is. Everything else is just weather. The manner of the telling is the only bit either of us gets to choose."]
+  ];
+  (function(){
+    var html = "";
+    for (var i=0;i<LINES.length;i++){
+      html += '<p class="' + (LINES[i][0]==="other" ? "other" : "") + '">' + LINES[i][1] + "</p>";
+    }
+    $("script").innerHTML = html + html;
+  })();
+
+  /* ---------------- helpers ---------------- */
+  function row(k,v,cls){
+    return '<div class="row"><span class="k">'+k+'</span><span class="v '+(cls||"")+'">'+v+'</span></div>';
+  }
+  function yn(ok){ return ok ? ["yes","pass"] : ["NO","fail"]; }
+  function store(k,v){ try{ localStorage.setItem("eyeline-probe:"+k, JSON.stringify(v)); }catch(e){} }
+  function load(k){ try{ var s = localStorage.getItem("eyeline-probe:"+k); return s===null ? null : JSON.parse(s); }catch(e){ return null; } }
+
+  /* ---------------- environment audit ---------------- */
+  var env = {};
+  env.protocol   = location.protocol;
+  env.origin     = location.origin;
+  env.secure     = !!window.isSecureContext;
+  env.ua         = navigator.userAgent;
+  env.platform   = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "unknown";
+  env.screen     = screen.width + "×" + screen.height + " @" + (window.devicePixelRatio||1) + "x";
+  env.viewport   = window.innerWidth + "×" + window.innerHeight;
+  env.gdm        = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  env.gum        = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  env.recorder   = (typeof window.MediaRecorder !== "undefined");
+  env.rvfc       = ("requestVideoFrameCallback" in HTMLVideoElement.prototype);
+  env.gamepad    = !!navigator.getGamepads;
+  env.speech     = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  env.wakeLock   = !!(navigator.wakeLock && navigator.wakeLock.request);
+  env.fullscreen = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+  env.fsAccess   = (typeof window.showSaveFilePicker === "function");
+  env.opfs       = !!(navigator.storage && navigator.storage.getDirectory);
+  env.audioWorklet = !!(window.AudioContext && window.AudioContext.prototype && ("audioWorklet" in AudioContext.prototype));
+  env.rtc        = (typeof window.RTCPeerConnection === "function");
+  env.share      = (typeof navigator.share === "function");
+  env.permissionsApi = !!(navigator.permissions && navigator.permissions.query);
+
+  var browser = "unknown";
+  if (/Edg\//.test(env.ua)) browser = "Edge";
+  else if (/CriOS\//.test(env.ua)) browser = "Chrome on iOS (WebKit)";
+  else if (/FxiOS\//.test(env.ua)) browser = "Firefox on iOS (WebKit)";
+  else if (/Chrome\//.test(env.ua) && !/OPR|Edg/.test(env.ua)) browser = "Chrome";
+  else if (/Firefox\//.test(env.ua)) browser = "Firefox";
+  else if (/Safari\//.test(env.ua)) browser = "Safari";
+  env.browser = browser;
+  env.blink = /Chrome\//.test(env.ua) && !/CriOS|FxiOS/.test(env.ua) && !/iPhone|iPad|iPod/.test(env.ua);
+
+  var mimes = [];
+  if (env.recorder){
+    ["video/mp4","video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm"].forEach(function(m){
+      if (MediaRecorder.isTypeSupported(m)) mimes.push(m);
+    });
+  }
+  env.mimes = mimes;
+
+  (function renderEnv(){
+    var h = "";
+    h += row("probe version", PROBE_VERSION);
+    h += row("browser", env.browser, env.blink?"pass":"warn");
+    h += row("platform", env.platform);
+    h += row("protocol", env.protocol, env.protocol==="https:"?"pass":"warn");
+    h += row("secure context", yn(env.secure)[0], yn(env.secure)[1]);
+    h += row("screen", env.screen);
+    h += row("viewport", env.viewport);
+    h += row("getDisplayMedia", yn(env.gdm)[0], yn(env.gdm)[1]);
+    h += row("getUserMedia", yn(env.gum)[0], yn(env.gum)[1]);
+    h += row("RTCPeerConnection", yn(env.rtc)[0], yn(env.rtc)[1]);
+    h += row("AudioWorklet", yn(env.audioWorklet)[0], yn(env.audioWorklet)[1]);
+    h += row("Wake Lock", yn(env.wakeLock)[0], env.wakeLock?"pass":"warn");
+    h += row("Fullscreen API", yn(env.fullscreen)[0], env.fullscreen?"pass":"warn");
+    h += row("File System Access", env.fsAccess?"yes":"no (downloads)", env.fsAccess?"pass":"warn");
+    h += row("OPFS", yn(env.opfs)[0], env.opfs?"pass":"warn");
+    h += row("MediaRecorder", yn(env.recorder)[0], yn(env.recorder)[1]);
+    h += row("frame callback", env.rvfc ? "exact" : "estimated", env.rvfc?"pass":"warn");
+    h += row("Gamepad API", yn(env.gamepad)[0], yn(env.gamepad)[1]);
+    h += row("speech recog.", env.speech?"present":"absent", env.speech?"pass":"warn");
+    h += row("Web Share", yn(env.share)[0], env.share?"pass":"");
+    h += row("record formats", mimes.length ? String(mimes.length) : "none", mimes.length?"pass":"fail");
+    $("envRows").innerHTML = h;
+  })();
+  report.env = env;
+
+  /* ---------------- installed-app state + launch memory ---------------- */
+  var pwa = {};
+  function displayMode(){
+    var modes = ["fullscreen","standalone","minimal-ui","browser"];
+    for (var i=0;i<modes.length;i++){
+      try{ if (window.matchMedia("(display-mode: "+modes[i]+")").matches) return modes[i]; }catch(e){}
+    }
+    return "unknown";
+  }
+  pwa.displayMode = displayMode();
+  pwa.navigatorStandalone = (typeof navigator.standalone === "boolean") ? navigator.standalone : "n/a";
+  pwa.openedFromIcon = pwa.displayMode==="standalone" || pwa.displayMode==="fullscreen" || pwa.navigatorStandalone===true;
+  pwa.launches = (load("launches")||0) + 1;
+  store("launches", pwa.launches);
+  pwa.previousCameraGrant = load("cameraGrant");   // {at, displayMode, promptSeen} from an earlier launch, or null
+  pwa.launchedAt = new Date().toISOString();
+
+  var perms = { camera:"unsupported", microphone:"unsupported" };
+  function queryPerms(cb){
+    if (!env.permissionsApi){ cb(); return; }
+    var pending = 2;
+    ["camera","microphone"].forEach(function(name){
+      var p;
+      try{ p = navigator.permissions.query({name:name}); }catch(e){ perms[name]="query threw"; if(--pending===0) cb(); return; }
+      p.then(function(st){ perms[name]=st.state; st.onchange=function(){ perms[name]=st.state; renderPwa(); }; },
+             function(){ perms[name]="query rejected"; })
+       .then(function(){ if(--pending===0) cb(); });
+    });
+  }
+  function renderPwa(){
+    var h = "";
+    h += row("display mode", pwa.displayMode, pwa.openedFromIcon?"pass":"warn");
+    h += row("navigator.standalone", String(pwa.navigatorStandalone));
+    h += row("opened from icon", pwa.openedFromIcon ? "yes" : "NO — this is a browser tab", pwa.openedFromIcon?"pass":"warn");
+    h += row("launches on this device", String(pwa.launches));
+    h += row("camera permission", perms.camera, perms.camera==="granted"?"pass":(perms.camera==="denied"?"fail":"warn"));
+    h += row("mic permission", perms.microphone, perms.microphone==="granted"?"pass":(perms.microphone==="denied"?"fail":"warn"));
+    if (pwa.previousCameraGrant){
+      h += row("earlier grant", pwa.previousCameraGrant.at.slice(0,16).replace("T"," ") + " in " + pwa.previousCameraGrant.displayMode);
+    } else {
+      h += row("earlier grant", "none recorded");
+    }
+    $("pwaRows").innerHTML = h;
+    report.pwa = pwa; report.permissions = perms;
+  }
+  renderPwa();
+  queryPerms(renderPwa);
+
+  /* ---------------- self-identity: hash the served HTML ---------------- */
+  (function selfHash(){
+    report.selfSha256 = "unavailable";
+    if (!(window.crypto && crypto.subtle && window.fetch)) { $("stamp").textContent = "self-hash unavailable"; return; }
+    fetch(location.href, {cache:"no-store"}).then(function(r){ return r.arrayBuffer(); })
+      .then(function(buf){ return crypto.subtle.digest("SHA-256", buf); })
+      .then(function(dig){
+        var hex = Array.prototype.map.call(new Uint8Array(dig), function(b){ return ("0"+b.toString(16)).slice(-2); }).join("");
+        report.selfSha256 = hex;
+        $("stamp").textContent = "served sha256 " + hex;
+      }, function(e){ report.selfSha256 = "failed: " + e; $("stamp").textContent = "self-hash failed"; });
+  })();
+
+  /* ---------------- capture + frame measurement ---------------- */
+  var feed = $("feed"), stream = null, track = null;
+  var frames = 0, lastStamp = 0, fpsWindow = [], stallSince = 0;
+  var minFps = Infinity, maxFps = 0, samples = [], startedAt = 0;
+  var capInfo = {};
+
+  function setVerdict(cls, title, body){
+    var v = $("verdict");
+    v.className = cls;
+    v.innerHTML = "<b>"+title+"</b>"+body;
+  }
+
+  function paintFps(f){
+    var el = $("fps");
+    el.textContent = (f === null) ? "0" : f.toFixed(0);
+    el.className = (f === null || f < 1) ? "dead" : (f < 12 ? "weak" : "good");
+  }
+
+  function renderCap(){
+    var h = "";
+    if (!track){ h = row("status","not started"); }
+    else {
+      var s = track.getSettings ? track.getSettings() : {};
+      h += row("surface", s.displaySurface || "unreported", s.displaySurface==="window"?"pass":"warn");
+      h += row("resolution", (s.width||"?") + "×" + (s.height||"?"));
+      h += row("requested fps", s.frameRate ? Math.round(s.frameRate) : "?");
+      h += row("frames seen", String(frames));
+      h += row("fps min / max", (minFps===Infinity?"—":minFps.toFixed(0)) + " / " + maxFps.toFixed(0));
+      h += row("longest stall", capInfo.worstStall ? capInfo.worstStall.toFixed(0)+" ms" : "0 ms",
+               (capInfo.worstStall>1000)?"fail":(capInfo.worstStall>300?"warn":"pass"));
+      h += row("elapsed", startedAt ? Math.round((performance.now()-startedAt)/1000)+" s" : "—");
+    }
+    $("capRows").innerHTML = h;
+  }
+
+  function onFrame(now){
+    frames++;
+    if (lastStamp){
+      var gap = now - lastStamp;
+      if (!capInfo.worstStall || gap > capInfo.worstStall) capInfo.worstStall = gap;
+    }
+    lastStamp = now;
+    fpsWindow.push(now);
+    while (fpsWindow.length && now - fpsWindow[0] > 1000) fpsWindow.shift();
+    if (env.rvfc) feed.requestVideoFrameCallback(onFrame);
+  }
+
+  function tick(){
+    if (track){
+      var now = performance.now();
+      while (fpsWindow.length && now - fpsWindow[0] > 1000) fpsWindow.shift();
+      var f = fpsWindow.length;
+      paintFps(f);
+      if (now - startedAt > 2000){
+        if (f < minFps) minFps = f;
+        if (f > maxFps) maxFps = f;
+        samples.push(f);
+      }
+      var since = lastStamp ? now - lastStamp : 0;
+      if (since > 1200){
+        setVerdict("dead","Capture stalled",
+          "No new frame for " + (since/1000).toFixed(1) + "s. Occluded window capture is failing on this machine.");
+      } else if (f < 12){
+        setVerdict("weak","Low frame rate",
+          "Frames arriving, but below 12&nbsp;fps. Usable for text-over-video, poor for reading a face.");
+      } else {
+        setVerdict("good","Capture live",
+          "Frames still arriving while this window covers the source. This is the result we need.");
+      }
+      renderCap();
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  var lastTime = -1;
+  setInterval(function(){
+    if (!env.rvfc && track && feed.currentTime !== lastTime){
+      lastTime = feed.currentTime;
+      onFrame(performance.now());
+    }
+  }, 16);
+
+  $("btnCap").addEventListener("click", async function(){
+    if (stream){ stop(); return; }
+    if (!env.gdm){ setVerdict("dead","No getDisplayMedia","This browser cannot capture windows. Expected on phones."); return; }
+    try{
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 30 } },
+        audio: false,
+        selfBrowserSurface: "exclude",
+        surfaceSwitching: "include"
+      });
+    } catch(e){
+      setVerdict("dead","Capture refused", String(e.name||e) + ". Check screen-recording permission for this browser, then retry.");
+      report.captureError = String(e && (e.name+": "+e.message));
+      return;
+    }
+    stopCam();
+    track = stream.getVideoTracks()[0];
+    feed.srcObject = stream;
+    feed.style.display = "block";
+    $("idle").style.display = "none";
+    $("btnCap").textContent = "Stop capture";
+    $("btnCap").classList.add("on");
+    frames = 0; lastStamp = 0; fpsWindow = []; minFps = Infinity; maxFps = 0;
+    samples = []; capInfo = {}; startedAt = performance.now();
+    if (env.rvfc) feed.requestVideoFrameCallback(onFrame);
+    track.addEventListener("ended", stop);
+    applyBg();
+  });
+
+  function stop(){
+    if (stream) stream.getTracks().forEach(function(t){ t.stop(); });
+    finishReport();
+    stream = null; track = null;
+    feed.style.display = "none";
+    $("idle").style.display = "flex";
+    $("btnCap").textContent = "Capture window";
+    $("btnCap").classList.remove("on");
+    paintFps(null);
+    setVerdict("", "Stopped", "Capture ended. Press Copy or Share report.");
+    renderCap();
+  }
+
+  function finishReport(){
+    var sorted = samples.slice().sort(function(a,b){return a-b;});
+    report.capture = {
+      settings: track && track.getSettings ? track.getSettings() : null,
+      framesSeen: frames,
+      seconds: startedAt ? +((performance.now()-startedAt)/1000).toFixed(1) : 0,
+      fpsMin: minFps===Infinity?null:minFps,
+      fpsMax: maxFps,
+      fpsMedian: sorted.length ? sorted[Math.floor(sorted.length/2)] : null,
+      worstStallMs: capInfo.worstStall ? +capInfo.worstStall.toFixed(0) : 0
+    };
+  }
+
+  /* ---------------- background framing ---------------- */
+  function applyBg(){
+    var z = $("zoom").value / 100;
+    var p = $("pan").value;
+    feed.style.transform = "translate(-50%,-50%) translateY(" + p + "vh) scale(" + z + ")";
+  }
+  $("zoom").addEventListener("input", applyBg);
+  $("pan").addEventListener("input", applyBg);
+
+  /* ---------------- scroll engine ---------------- */
+  var rolling = false, pos = 0, last = 0;
+  function loop(t){
+    if (rolling){
+      if (last){ pos += ($("spd").value / 1000) * (t - last) * 1.6; }
+      last = t;
+      $("scroller").style.transform = "translateY(" + (-pos) + "px)";
+    } else { last = 0; }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  function toggleRoll(){
+    rolling = !rolling;
+    $("btnRoll").textContent = rolling ? "Stop scroll" : "Start scroll";
+    $("btnRoll").classList.toggle("on", rolling);
+  }
+  $("btnRoll").addEventListener("click", toggleRoll);
+  $("siz").addEventListener("input", function(){ $("script").style.fontSize = this.value + "px"; });
+
+  var mirrored = false;
+  $("btnMir").addEventListener("click", function(){
+    mirrored = !mirrored;
+    $("script").style.transform = mirrored ? "scaleX(-1)" : "none";
+    this.classList.toggle("on", mirrored);
+  });
+  var cueOn = false;
+  $("btnCue").addEventListener("click", function(){
+    cueOn = !cueOn;
+    $("cue").style.display = cueOn ? "block" : "none";
+    this.classList.toggle("on", cueOn);
+  });
+  $("btnFull").addEventListener("click", function(){
+    var d = document, el = d.documentElement;
+    if (d.fullscreenElement || d.webkitFullscreenElement){
+      (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+    } else {
+      var req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (!req){ report.fullscreen = "API absent"; renderCtl(); return; }
+      var p = req.call(el);
+      if (p && p.catch) p.catch(function(e){ report.fullscreen = "refused: " + (e.name||e); renderCtl(); });
+      report.fullscreen = "requested";
+    }
+  });
+  $("btnDiag").addEventListener("click", function(){
+    $("diag").classList.toggle("open");
+    this.classList.toggle("on", $("diag").classList.contains("open"));
+  });
+
+  /* ---------------- controller + camera checks ---------------- */
+  var keysSeen = [], padsSeen = [], padButtons = [];
+  function renderCtl(){
+    var h = "";
+    h += row("last key", keysSeen.length ? keysSeen[keysSeen.length-1] : "press one", keysSeen.length?"pass":"");
+    h += row("distinct keys", String(keysSeen.length));
+    h += row("gamepads", padsSeen.length ? padsSeen.join(", ").slice(0,40) : "none connected", padsSeen.length?"pass":"");
+    h += row("pad buttons", padButtons.length ? padButtons.join(",") : "—");
+    h += row("fullscreen", report.fullscreen || "not tried");
+    h += row("camera", report.camera ? report.camera.summary : "not tested", report.camera ? (report.camera.ok?"pass":"fail") : "");
+    if (report.camera && report.camera.ok){
+      h += row("time to open", report.camera.openMs + " ms", report.camera.openMs < 800 ? "pass" : "warn");
+      h += row("permission before", report.camera.permissionBefore);
+      h += row("prompt seen", report.camera.promptSeen === null ? "answer above" : (report.camera.promptSeen ? "yes" : "no"));
+      h += row("devices", String(report.camera.videoInputs) + " cam / " + String(report.camera.audioInputs) + " mic");
+    }
+    $("ctlRows").innerHTML = h;
+  }
+  renderCtl();
+
+  window.addEventListener("keydown", function(e){
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    var label = e.code + (e.key.length===1 ? " ("+e.key+")" : "");
+    if (keysSeen.indexOf(label) === -1) keysSeen.push(label);
+    if (e.code === "Space"){ e.preventDefault(); toggleRoll(); }
+    renderCtl();
+  });
+
+  setInterval(function(){
+    if (!navigator.getGamepads) return;
+    var pads = navigator.getGamepads(), changed = false;
+    padsSeen = [];
+    for (var i=0;i<pads.length;i++){
+      if (!pads[i]) continue;
+      padsSeen.push(pads[i].id.slice(0,24));
+      for (var b=0;b<pads[i].buttons.length;b++){
+        if (pads[i].buttons[b].pressed && padButtons.indexOf(b) === -1){ padButtons.push(b); changed = true; }
+      }
+    }
+    if (changed || padsSeen.length) renderCtl();
+  }, 200);
+
+  var camStream = null, camfeed = $("camfeed");
+  function stopCam(){
+    if (camStream){ camStream.getTracks().forEach(function(t){ t.stop(); }); camStream = null; }
+    camfeed.style.display = "none";
+    camfeed.srcObject = null;
+    $("btnCam").textContent = "Test camera";
+    $("btnCam").classList.remove("on");
+    if (!stream) $("idle").style.display = "flex";
+  }
+  function askPromptSeen(){
+    // The human is the instrument for this one: the page cannot see the OS prompt.
+    var v = $("verdict");
+    var ask = document.createElement("div");
+    ask.className = "ask";
+    ask.innerHTML = '<span style="align-self:center">Did a permission prompt appear?</span><button data-a="1">Yes</button><button data-a="0">No</button>';
+    ask.addEventListener("click", function(e){
+      if (!e.target.dataset || e.target.dataset.a === undefined) return;
+      var seen = e.target.dataset.a === "1";
+      report.camera.promptSeen = seen;
+      store("cameraGrant", { at: new Date().toISOString(), displayMode: pwa.displayMode, promptSeen: seen });
+      ask.innerHTML = "<span>Recorded: prompt " + (seen ? "seen" : "not seen") + ". Now close the app fully, reopen from the icon, and test again.</span>";
+      renderCtl();
+    });
+    v.appendChild(ask);
+  }
+
+  $("btnCam").addEventListener("click", async function(){
+    if (camStream){ stopCam(); setVerdict("","Camera stopped","Press Copy or Share report."); return; }
+    if (!env.gum){ setVerdict("dead","No getUserMedia","This context has no camera API. That is the finding."); report.camera={ok:false,summary:"getUserMedia absent"}; renderCtl(); return; }
+    var before = perms.camera;
+    var t0 = performance.now();
+    try{
+      camStream = await navigator.mediaDevices.getUserMedia({ video:{ width:{ideal:1920}, facingMode:"user" }, audio:true });
+      var openMs = Math.round(performance.now() - t0);
+      var vt = camStream.getVideoTracks()[0], s = vt.getSettings ? vt.getSettings() : {};
+      var vi = 0, ai = 0;
+      try{
+        var devs = await navigator.mediaDevices.enumerateDevices();
+        devs.forEach(function(d){ if (d.kind==="videoinput") vi++; if (d.kind==="audioinput") ai++; });
+      }catch(e){}
+      report.camera = {
+        ok:true,
+        summary:(s.width||"?")+"×"+(s.height||"?")+" @"+Math.round(s.frameRate||0),
+        settings:s, mimeTypes:env.mimes,
+        openMs: openMs, permissionBefore: before, promptSeen: null,
+        videoInputs: vi, audioInputs: ai,
+        displayMode: pwa.displayMode, launch: pwa.launches
+      };
+      if (stream) stop();
+      camfeed.srcObject = camStream;
+      camfeed.style.display = "block";
+      $("idle").style.display = "none";
+      $("btnCam").textContent = "Stop camera";
+      $("btnCam").classList.add("on");
+      setVerdict("good","Camera live in " + pwa.displayMode,
+        report.camera.summary + ", opened in " + openMs + " ms" + (before!=="unsupported" ? ", permission was “" + before + "”" : "") + ".");
+      askPromptSeen();
+      queryPerms(renderPwa);
+    } catch(e){
+      report.camera = { ok:false, summary:String(e.name||e), message:String(e.message||""), permissionBefore: before, displayMode: pwa.displayMode, launch: pwa.launches };
+      setVerdict("dead","Camera refused in " + pwa.displayMode, String(e.name||e) + (e.message ? " — " + e.message : "") + ". This is the finding; copy the report.");
+      queryPerms(renderPwa);
+    }
+    renderCtl();
+  });
+
+  /* ---------------- report ---------------- */
+  function reportText(){
+    if (track) finishReport();
+    report.generated = new Date().toISOString();
+    return "EYELINE CAPTURE PROBE v" + PROBE_VERSION + "\n" + JSON.stringify(report, null, 2);
+  }
+  $("btnCopy").addEventListener("click", function(){
+    var txt = reportText(), btn = this;
+    function done(ok){ btn.textContent = ok ? "Copied" : "Copy failed — use Show"; setTimeout(function(){ btn.textContent = "Copy report"; }, 2200); }
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(txt).then(function(){done(true);}, function(){ fallback(txt, done); });
+    } else fallback(txt, done);
+  });
+  function fallback(txt, done){
+    var ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    var ok = false; try{ ok = document.execCommand("copy"); }catch(e){}
+    document.body.removeChild(ta); done(ok);
+  }
+  $("btnShare").addEventListener("click", function(){
+    var txt = reportText(), btn = this;
+    if (!env.share){ btn.textContent = "Share unavailable"; setTimeout(function(){ btn.textContent = "Share report"; }, 2200); return; }
+    navigator.share({ title: "Eyeline probe report", text: txt }).catch(function(){});
+  });
+  $("btnShow").addEventListener("click", function(){
+    var sh = $("sheet"), open = sh.style.display === "block";
+    if (open){ sh.style.display = "none"; this.classList.remove("on"); return; }
+    $("sheetText").value = reportText();
+    sh.style.display = "block"; this.classList.add("on");
+  });
+
+})();
+</script>
+</body>
+</html>
