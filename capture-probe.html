@@ -18,6 +18,9 @@
   Chrome has not required one since 108 and a caching worker could serve a stale
   probe under a new version's name.
   v2.0.1 — files and strings renamed to the working title. No functional change.
+  v2.0.2 — the grant is stored the moment the camera opens (launch memory no longer
+  depends on the Yes/No being tapped), and Details closes when Test camera is
+  pressed so the result box and the question are never hidden on a phone.
 -->
 <link rel="manifest" href="capture-probe.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -274,7 +277,7 @@
 (function(){
   "use strict";
 
-  var PROBE_VERSION = "2.0.1";
+  var PROBE_VERSION = "2.0.2";
   var $ = function(id){ return document.getElementById(id); };
   var report = { probeVersion: PROBE_VERSION };
 
@@ -696,7 +699,8 @@
       if (!e.target.dataset || e.target.dataset.a === undefined) return;
       var seen = e.target.dataset.a === "1";
       report.camera.promptSeen = seen;
-      store("cameraGrant", { at: new Date().toISOString(), displayMode: pwa.displayMode, promptSeen: seen });
+      var g = load("cameraGrant") || { at: new Date().toISOString(), displayMode: pwa.displayMode };
+      g.promptSeen = seen; store("cameraGrant", g);
       ask.innerHTML = "<span>Recorded: prompt " + (seen ? "seen" : "not seen") + ". Now close the app fully, reopen from the icon, and test again.</span>";
       renderCtl();
     });
@@ -717,6 +721,7 @@
         var devs = await navigator.mediaDevices.enumerateDevices();
         devs.forEach(function(d){ if (d.kind==="videoinput") vi++; if (d.kind==="audioinput") ai++; });
       }catch(e){}
+      $("diag").classList.remove("open"); $("btnDiag").classList.remove("on");
       report.camera = {
         ok:true,
         summary:(s.width||"?")+"×"+(s.height||"?")+" @"+Math.round(s.frameRate||0),
@@ -725,6 +730,7 @@
         videoInputs: vi, audioInputs: ai,
         displayMode: pwa.displayMode, launch: pwa.launches
       };
+      store("cameraGrant", { at: new Date().toISOString(), displayMode: pwa.displayMode, promptSeen: null, permissionBefore: before, openMs: openMs });
       if (stream) stop();
       camfeed.srcObject = camStream;
       camfeed.style.display = "block";
